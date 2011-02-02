@@ -7,7 +7,11 @@
 //
 
 #import "BitTorrent.h"
+
+// Needed for SHA1 functions
 #import <CommonCrypto/CommonDigest.h>
+
+// Needed for BEncoding the file/dicitonary
 #import "BEncoding.h";
 
 // Needed for reading file
@@ -57,14 +61,6 @@
 		// If there's no readable file at that path, return nil
 		return nil;
 	}
-}
-
-+ (NSData *)torrentFromPath:(NSString *)path withDelegate:(id <BitTorrentDelegate>)delegate {
-	if ([delegate respondsToSelector:@selector(progressUpdate:)]) {
-		[delegate progressUpdate:[NSNumber numberWithInt:123]];
-	}
-	
-	return nil;
 }
 
 + (NSData *)torrentFromFile:(NSString *)source {
@@ -167,14 +163,6 @@
 		return nil;
 	}
 	// We couldn't read the file
-	return nil;
-}
-
-+ (NSData *)torrentFromFile:(NSString *)source withTrackers:(NSArray *)trackers {
-	return nil;
-}
-
-+ (NSData *)torrentFromFile:(NSString *)source withPieceSize:(NSInteger)pieceSize andTrackers:(NSArray *)trackers {
 	return nil;
 }
 
