@@ -268,6 +268,8 @@
 	// Get the default file manager
 	NSFileManager *fileManager = [NSFileManager defaultManager];
 	
+	NSLog(@"%@", [fileManager attributesOfItemAtPath:file error:nil]);
+	
 	return nil;
 }
 + (NSData *)torrentFromDirectory:(NSString *)directory withPieceLength:(NSNumber *)pieceLength andTrackers:(NSArray *)trackers andPrivate:(BOOL)private andDHT:(NSArray *)hashTable andCaller:(id)caller andTotalSize:(NSNumber *)totalSize {
@@ -276,10 +278,171 @@
 		return nil;
 	}
 	
+	// Create the dictionary
+	NSMutableDictionary *unencoded = [[NSMutableDictionary alloc] init];
+	
+	// Set announce
+	if (trackers) {
+		if ([trackers count] == 1) {
+			[unencoded setObject:[trackers objectAtIndex:0] forKey:@"announce"];
+		} else if ([trackers count] > 1) {
+			[unencoded setObject:trackers forKey:@"announce-list"];
+		}
+	}
+	
+	// Create the info dictionary and add it to the main dictionary
+	NSMutableDictionary *info = [NSMutableDictionary dictionary];
+	[unencoded setObject:info forKey:@"info"];
+	
+	// Set the piece length
+	[info setObject:pieceLength forKey:@"piece length"];
+	
+	// Set the name of the directory
+	[info setObject:[directory lastPathComponent] forKey:@"name"];
+	
+	// Add the files list to the dictionary
+	[info setObject:[NSMutableArray array] forKey:@"files"];
+	
+	// We then need a place to store the hash values
+	NSMutableData *hashes = [NSMutableData data];
+	
+	// We also need a variable to store the current file chunk in
+	NSMutableData *chunk = nil;
+	
 	// Get the default file manager
 	NSFileManager *fileManager = [NSFileManager defaultManager];
 	
-	return nil;
+	// Get the enumerator for the folder
+	NSDirectoryEnumerator *enumerator = [fileManager enumeratorAtPath:directory];
+	
+	// Variable to keep track of progress
+	unsigned long long bytesRead = 0;
+	NSNumber *progress = [NSNumber numberWithInt:0];
+	
+	// Enumerate through the directory and calculate hashes for all files
+	NSString *file;
+	while (file = [enumerator nextObject]) {
+		
+		// Get the attribues of the current file
+		NSDictionary *attributes = [enumerator fileAttributes];
+		
+		// Check the file type
+        if ([attributes objectForKey:NSFileType] != NSFileTypeRegular) {
+			// If it's not a regular file, skip to next object
+			continue;
+		} else {
+			// If it's a file get the path relative to the top level folder in the torrent
+			// and the file length and add them to the files array
+			NSMutableDictionary *fileAttributes = [NSMutableDictionary dictionary];
+			[fileAttributes setObject:[file pathComponents] forKey:@"path"];
+			[fileAttributes setObject:[attributes objectForKey:NSFileSize] forKey:@"length"];
+			[[info valueForKey:@"files"] addObject:fileAttributes];
+		}
+		
+		// Open the file for reading
+		FILE *sourceFile = fopen([[NSString stringWithFormat:@"%@/%@", directory, file] cStringUsingEncoding:NSUTF8StringEncoding], "r");
+		
+		// Check that the file was successfully opened
+		if (sourceFile == NULL) {
+			// Something went wrong. Clean up the allocated memory and return
+			[hashes release];
+			[unencoded release];
+			if (chunk != nil) {
+				[chunk release];
+			}
+			return nil;
+		}
+		
+		// Read and hash the file
+		while (!feof(sourceFile)) {
+			
+			// If chunk isn't initialized do it now
+			if (chunk == nil) {
+				chunk = [[NSMutableData alloc] init];
+			}
+			
+			// Read data from file
+			NSData *tmp = [self copyChunkOfLength:([pieceLength unsignedIntegerValue] - [chunk length]) fromFile:sourceFile];
+			
+			// Add the data read from file to the chunk
+			[chunk appendData:tmp];
+			
+			// Release the data read from file
+			[tmp release];
+			
+			if ([chunk length] == [pieceLength unsignedIntegerValue]) {
+				// Get the SHA-1 hash
+				NSData *sha1 = [self newSHA1OfData:chunk];
+				
+				// Get the hash
+				[hashes appendData:sha1];
+				
+				// Update progress
+				bytesRead += [chunk length];
+				
+				// Release the chunk and set the pointer to nil
+				[sha1 release];
+				[chunk release];
+				
+				chunk = nil;
+				
+				// Report progress
+				if (caller && [caller respondsToSelector:@selector(progressUpdate:)] && ([progress unsignedIntValue] < [[NSNumber numberWithInt:(int)(((float)bytesRead / (float)[totalSize unsignedLongLongValue]) * 100)] unsignedIntValue])) {
+					progress = [NSNumber numberWithInt:(int)(((float)bytesRead / (float)[totalSize unsignedLongLongValue]) * 100)];
+					[caller performSelector:@selector(progressUpdate:) withObject:progress];
+				}
+			}
+		}
+		
+		// Close the file
+		fclose(sourceFile);
+		
+	}
+	
+	// If the file length didn't fit exactly to piece length we will have some remaining data to hash
+	if (chunk != nil) {
+		// Get the SHA-1 hash
+		NSData *sha1 = [self newSHA1OfData:chunk];
+		
+		// Generating and storing the hash of the last piece
+		[hashes appendData:sha1];
+		
+		// Update progress
+		bytesRead += [chunk length];
+		
+		// Release the piece
+		[sha1 release];
+		[chunk release];
+		chunk = nil;
+	}
+	
+	// Report progress
+	float byteFloat = (float)bytesRead;
+	float totalFloat = (float)[totalSize unsignedLongLongValue];
+	
+	NSNumber *currentProgress = [NSNumber numberWithInt:(int)((byteFloat / totalFloat) * 100)];
+	//NSLog(@"Old: %@ New: %@", progress, currentProgress);
+	if (caller && [caller respondsToSelector:@selector(progressUpdate:)] && ([progress unsignedIntValue] < [currentProgress unsignedIntValue])) {
+		progress = currentProgress;
+		[caller performSelector:@selector(progressUpdate:) withObject:progress];
+	}
+	
+	// Add the pieces to the dictionary
+	[info setObject:hashes forKey:@"pieces"];
+	
+	// BEncode the file
+	NSData *encoded = [NSData dataWithData:[BEncoding encodedDataFromObject:unencoded]];
+	
+	// Release the unencoded torrent
+	[unencoded release];
+	
+	// Tell the caller that we've finished
+	if (caller && [caller respondsToSelector:@selector(statusUpdate:)]) {
+		[caller performSelector:@selector(statusUpdate:) withObject:@"Done"];
+	}
+	
+	// Return the BEncoded file
+	return encoded;
 }
 
 // Read length bytes from file and return as NSData
